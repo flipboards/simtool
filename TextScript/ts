@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+
+"""
+TextScript: 
+
+Written by Yanze Wu @ Fall 2017
+"""
+
+import sys 
+import getopt
+import re 
+from collections import OrderedDict
+from io import StringIO
+
+__version__ = '1.2'
+
+# ======== UTILS =============
+
+def read_dict(dict_str:str, ret:dict):
+    """ Convert string to dict
+    """
+    dict_str1 = re.sub(' *, *', ',', dict_str.strip().rstrip())
+    dict_str2 = re.sub(' *: *', ':', dict_str1)
+
+    ret.update([item.split(':') for item in dict_str2.split(',')])
+
+
+def stor(string:str):
+    """ String to basic types
+    """
+    if string in ['True', 'true', 'False', 'false']:
+        return bool(string)
+
+    try:
+        if '.' in string:
+            return float(string)
+        else:
+            return int(string)
+    except ValueError:
+        return string 
+
+
+# ============ TS KERNELS ============
+
+def ts_replace(name:str, arg_table, flag_str_raw, strict_mode):
+    """ Replace a single string with new string.
+    """
+    try:
+        return arg_table[name]
+    except KeyError:
+        if not strict_mode:
+            return flag_str_raw + name
+        else:
+            print("No value for variable: %s" % name, file=sys.stderr)
+            raise 
+
+
+def ts_exact(name:str):
+    """ Exact variable name from string
+    """
+    
+    name1 = ''
+    quotastack = []
+
+    for c in name:
+        if c in ['\'', '\"']:
+            if len(quotastack) == 0 or quotastack[-1] != c:
+                quotastack.append(c)
+            elif quotastack[-1] == c: # match, pop
+                quotastack.pop()
+        elif len(quotastack) == 0:
+            name1 += c
+
+    return re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*(?!\()\b', name1)
+
+def ts_eval(string:str, arg_table):
+    """ Evaluate expression.
+    """
+    return str(eval(string, arg_table))
+
+def ts_exec(string:str, arg_table):
+    """ Execute code block, return stdout
+    """
+    string1 = '\n'.join([s.strip().rstrip() for s in string.split('\n')])   # remove indent
+
+    mystdout = sys.stdout
+    newstdout = sys.stdout = StringIO()
+    exec(string1, arg_table)
+    sys.stdout = mystdout
+    return newstdout.getvalue()
+
+
+# ======== SCAN FUNCTION ====================
+
+def ts_scan(string:str, arg_table, arg_table_num, flag_str='$', mode='eval', strict_mode=False):
+    """ Scan string and perform replacement
+    """
+    exec_func = ts_exec if mode == 'exec' else ts_eval
+
+    flag_str_raw = flag_str
+    flag_str = re.sub(r'([\W])', r'\\\1', flag_str) 
+     
+    new_str1 = re.sub(r'(?<!\\)%s(\w+)' % flag_str, lambda m:ts_replace(m.group(1), arg_table, flag_str_raw, strict_mode), string)   # repalce variable
+    new_str2 = re.sub(r'(?<!\\)%s\{(?P<a>([^\}]|\n)*)\}' % flag_str, lambda m:exec_func(m.group('a'), arg_table_num), new_str1) # evaluate functions
+    new_str3 = re.sub(r'\\%s' % flag_str, flag_str_raw, new_str2) # replace unused flag str
+
+    return new_str3
+
+
+def ts_scan_args(string: str, flag_str='$'):
+    
+    flag_str = re.sub(r'([\W])', r'\\\1', flag_str)
+    args = [m.group(1) for m in re.finditer(r'(?<!\\)%s(\w+)' % flag_str, string)]  # single variable
+    codes = [m.group('a') for m in re.finditer(r'(?<!\\)%s\{(?P<a>([^\}]|\n)*)\}' % flag_str, string)]
+    for c in codes:
+        args.extend(ts_exact(c))
+
+    return args 
+
+# ======= UI ================
+
+
+def read_macro(lines:list):
+    """ Input: list of string;
+        Returns: list of macro line number
+    """
+    macro_lines = []
+    macro_line_no = []
+    normal_line_begin = -1
+
+    for i, line in enumerate(lines):
+        if line.startswith('#ts'):
+            macro_line_no.append(i) 
+            macro_lines.append(line.rstrip('\n'))
+            
+        elif len(line) > 0 and line[0] not in [' ', '\t', '\n']:
+            normal_line_begin = i 
+            break    
+    return macro_lines, macro_line_no, normal_line_begin
+
+
+def divide_macro(lines:list, macro_line_no:list, normal_line_begin:int, rmmacro):
+    """ Input: list of string, macro_line_no, normal_line_begin
+        Returns: string before macro, string after macro
+    """
+
+    if normal_line_begin == -1: # no macro
+        str_before_macro = ''
+        str_after_macro = ''.join(lines)
+    else:
+        str_after_macro = ''.join(lines[normal_line_begin:])
+        if rmmacro:
+            str_before_macro = ''.join([lines[i] for i in range(normal_line_begin) if i not in macro_line_no])
+        else:
+            str_before_macro = ''.join(lines[:normal_line_begin])
+
+    return str_before_macro, str_after_macro
+
+
+# ========== main functions ================
+
+
+def main_sub(argv):
+    """ Main entry for ts sub
+    """
+
+    help_str = '''ts sub [-r name1:value1, name2:value2, ...] [-o output] [--flag=flag_str] 
+        [--exec] [--strmode] [--strict] [--rmmacro] [-v/--version] [-h/--help] input'''
+    long_help_str = '''
+ts sub: Provide pythonic, advanced substitution for files.
+Arguments:
+--exec:     use 'exec' instead of 'eval' in blocks
+--flag:     specify flag str (only one char), default is '$'
+-h/--help:  display this help string
+-o:         output filename (default is stdout)
+-r:         replace string, followed by name:value... dict
+--rmmacro:  remove macro in file after substitution
+--strict:   all variables must be replaced
+--strmode:  treat value as string (default is auto convert to number)
+-v/--version: display version
+    '''
+
+    if not argv:
+        print(help_str)
+        return 
+    elif argv[1] == '-h' or argv[1] == '--help':
+        print(long_help_str)
+        return
+    elif argv[1] == '-v' or argv[1] == '--version':
+        print('Version: %s' % __version__, file=sys.stderr)
+        return 
+    
+    short_args = 'r:o:'
+    long_args = ['exec', 'flag=', 'strmode', 'strict', 'rmmacro']    
+    args = getopt.getopt(argv[1:], short_args, long_args)[1]
+
+    arg_table = dict()
+    auto_number = True
+    flag_str = '$'
+    full_argv = []    
+    mode = 'eval'
+    raw_output = ''
+    strict_mode = False 
+    rmmacro = False 
+
+    
+    # input
+    assert args, 'Error: No input'
+    with open(args[0], 'r') as inf:
+        flines = inf.readlines()
+    macro_lines, macro_line_no, normal_line_begin = read_macro(flines)
+
+    # deal with macros
+    for macro in macro_lines:
+        lsplit = macro.split()
+        assert len(lsplit) > 2, 'Invalid macro'
+        if lsplit[1] == 'set':
+            full_argv.extend(lsplit[2:])
+
+    full_argv.extend(argv[1:])   
+
+   # CLR
+    opts, args = getopt.getopt(full_argv, short_args, long_args)
+
+    for opt, arg in opts:
+        if opt == '--exec':
+            mode = 'exec'
+        elif opt == '--flag':
+            assert len(arg) == 1, 'Flag should be a char'
+            flag_str = arg 
+        elif opt == '-r':
+            read_dict(arg, arg_table)
+        elif opt == '--rmmacro':
+            rmmacro = True 
+        elif opt == '-o':
+            raw_output = arg
+        elif opt == '--strict':
+            strict_mode = True 
+        elif opt == '--strmode':
+            auto_number = False
+
+    
+    # auto convert
+    if auto_number:
+        arg_table_num = dict([(name, stor(val)) for name, val in arg_table.items()])
+    else:
+        arg_table_num = arg_table
+
+    str_before_macro, str_after_macro = divide_macro(flines, macro_line_no, normal_line_begin, rmmacro)
+    new_str = ts_scan(str_after_macro, arg_table, arg_table_num, flag_str=flag_str, mode=mode)
+
+    if raw_output:
+        output_name = ts_scan(raw_output, arg_table, arg_table_num, flag_str=flag_str, mode=mode)
+        output = open(output_name, 'w')
+    else:
+        output = sys.stdout 
+
+
+    output.write(str_before_macro)
+    output.write(new_str)
+    output.close()
+    return
+
+
+def main_view(argv):
+    
+    help_str = 'ts view [--flag=flag_str] input'
+    long_help_str = '''
+ts view: View arguments in a textscript file.
+Arguments:
+--flag:     specify flag str
+-h/--help:  display this help
+-v/--version: display version
+    '''
+    if not argv:
+        print(help_str)
+        return 
+    elif argv[1] == '-h' or argv[1] == '--help':
+        print(long_help_str)
+        return
+    elif argv[1] == '-v' or argv[1] == '--version':
+        print('Version: %s' % __version__, file=sys.stderr)
+        return 
+    
+    short_args = 'r:o:'
+    long_args = ['exec', 'flag=', 'strmode', 'strict', 'rmmacro']    
+    args = getopt.getopt(argv[1:], short_args, long_args)[1]
+
+    arg_table = dict()
+    arg_note = dict()
+    flag_str = '$'
+    full_argv = []    
+    raw_output = ''    
+        
+    # input
+    assert args, 'Error: No input'
+    with open(args[0], 'r') as inf:
+        flines = inf.readlines()
+    macro_lines, macro_line_no, normal_line_begin = read_macro(flines)
+
+    # deal with macros
+    for macro in macro_lines:
+        lsplit = macro.split()
+        assert len(lsplit) > 2, 'Invalid macro'
+        if lsplit[1] == 'set':
+            full_argv.extend(lsplit[2:])
+        elif lsplit[1] == 'note':
+            arg_note[lsplit[2]] = ' '.join(lsplit[3:])
+
+    full_argv.extend(argv[1:]) 
+
+   # CLR
+    opts, args = getopt.getopt(full_argv, short_args, long_args)
+
+    for opt, arg in opts:
+        if opt == '--flag':
+            assert len(arg) == 1, 'Flag should be a char'
+            flag_str = arg         
+        elif opt == '-r':
+            read_dict(arg, arg_table)
+        elif opt == '-o':
+            raw_output = arg
+
+    # scan args
+    str_after_macro = divide_macro(flines, macro_line_no, normal_line_begin, True)[1]
+    arg_list = set(ts_scan_args(str_after_macro, flag_str))
+    arg_list.update(arg_table)
+
+    if raw_output:
+        arg_list.update(ts_scan_args(raw_output, flag_str))
+    else:
+        raw_output = '<stdout>'
+
+    print('Output: %s' % raw_output)
+    print('Name\tDefault\tDescription')
+    for a in arg_list:
+        print('%s\t%s\t%s' % (a, arg_table.get(a, '<unset>'), arg_note.get(a, '')))
+    return 
+
+
+def main(argv):
+    if argv[1] == 'sub':
+        return main_sub(argv[1:])
+    elif argv[1] == 'view':
+        return main_view(argv[1:])
+    else:
+        raise getopt.GetoptError()
+
+
+if __name__ == '__main__':
+    try:
+        main(sys.argv)
+    except AssertionError as e:
+        print(e.args[0], file=sys.stderr)
+    except getopt.GetoptError:
+        print('Error: invalid argument\nType "-h" to see argment list', file=sys.stderr)
