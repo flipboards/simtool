@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-
-"""
-TextScript: 
-
-Written by Yanze Wu @ Fall 2017
-"""
+# This is one of script series in SimTool project. For more information,
+# please see https://github.com/flipboards/simtool
 
 import sys 
 import getopt
@@ -164,7 +160,7 @@ def main_sub(argv):
     """ Main entry for ts sub
     """
 
-    help_str = '''ts sub [-r name1:value1, name2:value2, ...] [-o output] [--flag=flag_str] 
+    help_str = '''Usage: ts sub [-r name1:value1, name2:value2, ...] [-o output] [--flag=flag_str] 
         [--exec] [--strmode] [--strict] [--rmmacro] [-v/--version] [-h/--help] input'''
     long_help_str = '''
 ts sub: Provide pythonic, advanced substitution for files.

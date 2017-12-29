@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+# This is one of script series in SimTool project. For more information,
+# please see https://github.com/flipboards/simtool
+
+import getopt
+import sys
+import pandas
+import numpy as np
+
+
+def parse_titles(title_strings:list, header):
+    ''' Parse title string (which can be $1 or string)
+    '''
+    index = []
+    title = []
+
+    for t in title_strings:
+        assert t, 'Invalid string'
+        if t[0] == '$':
+            pos = int(t[1:]) - 1
+            assert pos >= 0, 'Invalid column index'
+            index.append(pos)
+            title.append((header[pos] if header is not None else str(pos)))
+        else:
+            assert header is not None, 'No header, cannot use string as title'
+            assert t in header, 'Cannot find header'
+            title.append(t)
+            index.append(header.get_loc(t))
+
+    return index, title 
+
+
+def main(argv):
+
+    help_str = 'Usage: colstat [-s split] [--stat=ave/sum/dev] [-u (xcol1,xcol2,...:)ycol1,ycol2,...] file ...'
+    long_help_str = '''
+colstat: Statistics on multiple data sheets.
+Arguments:
+--format:       float format, default is '%g'
+-h,--help:      display this help message.
+--notitle:      do not use title (and in output).
+-s:             specify split string of input datasheet. Default is tab.
+--sep:          specify output split string. Default is tab.
+--stat:         which statistic to perform. Can be 'ave'/'sum'/'dev'(standard deviation) Default is 'ave'
+-u:             which column to use. Similar with gnuplot grammar, column can be '$1' to specify index, or
+                strings to specify title.
+file:           files to read.
+    '''
+    short_args = 'hs:u:'
+    long_args = ['format=', 'notitle', 'help', 'sep=', 'stat=']
+
+    try:
+        opts, args = getopt.getopt(argv[1:], short_args, long_args)
+    except getopt.GetoptError:
+        print('Invalid argument. Use `-h` to get help', file=sys.stderr)
+        return 1
+
+    xcols = []
+    ycols = []
+    float_format = '%g'
+    title = True
+    sep_in = '\t'
+    sep_out = '\t'
+    stat = 'ave'
+
+    for opt, arg in opts:
+        if opt == '--format':
+            float_format = arg 
+        elif opt == '-h' or opt == '--help':
+            print(long_help_str)
+            return 1
+        elif opt == '--notitle':
+            title = False        
+        elif opt == '-s':
+            sep_in = ('\t' if arg == '\\t' else arg )
+        elif opt == '--sep':
+            sep_out = ('\t' if arg == '\\t' else arg )
+        elif opt == '--stat':
+            assert arg in ['ave', 'sum', 'dev'], 'No such operation'
+            stat = arg 
+        elif opt == '-u':
+            if ':' in arg:
+                x1, y1 = arg.split(':')
+                xcols = x1.split(',')
+                ycols = y1.split(',')
+            else:
+                ycols = arg.split(',')
+
+    if not args:
+        print('Error: No args', file=sys.stderr)
+        return 1
+
+    dataframes = [pandas.read_csv(name, sep=sep_in, index_col=False, header=(0 if title else None)) for name in args]
+
+    if xcols:
+        xindex, xtitle = parse_titles(xcols, dataframes[0].columns)
+    
+    if ycols:
+        yindex, ytitle = parse_titles(ycols, dataframes[0].columns)
+    else:
+        yindex = range(len(dataframes[0].columns))
+        ytitle = dataframes[0].columns
+
+    if xcols:
+        xoutput = dataframes[0][xtitle]  # select x columns
+    else:
+        xoutput = None
+    
+    youtput = []
+    for yidx in yindex:
+        if stat == 'ave':
+            youtput.append(np.average([df.iloc[:, yidx] for df in dataframes], axis=0))
+        elif stat == 'sum':
+            youtput.append(np.sum([df.iloc[:, yidx] for df in dataframes], axis=0))
+        elif stat == 'dev':
+            youtput.append(np.std([df.iloc[:, yidx] for df in dataframes], axis=0))
+
+    yf = pandas.DataFrame(np.array(youtput).T, columns=ytitle)
+    if xoutput is not None:
+        output = xoutput.join(yf)
+    else:
+        output = yf
+
+    output.to_csv(sys.stdout, sep=sep_out, index=False, header=title, float_format=float_format)
+    return
+
+if __name__ == '__main__':
+    main(sys.argv)
+    

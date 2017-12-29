@@ -1,6 +1,6 @@
 # Textscript manual
 
-Textscript is a light script based on python, for generating input/script files more flexibly and efficiently. Its two commands are:
+Textscript is a light script parser based on python, for generating input/script files more flexibly and efficiently. Its two commands are:
 
 - ts sub: Substitute variables and execute block commands;
 - ts view: View variables;
