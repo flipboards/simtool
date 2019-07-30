@@ -23,7 +23,7 @@ def parse_titles(title_strings:list, header):
             title.append((header[pos] if header is not None else str(pos)))
         else:
             assert header is not None, 'No header, cannot use string as title'
-            assert t in header, 'Cannot find header'
+            assert t in header, 'Cannot find header %r' % t
             title.append(t)
             index.append(header.get_loc(t))
 

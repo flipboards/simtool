@@ -1,34 +1,51 @@
 #!/usr/bin/env python3
-# This is one of script series in SimTool project. For more information,
-# please see https://github.com/flipboards/simtool
+
+"""
+TextScript: 
+
+Written by Yanze Wu @ Fall 2018
+"""
 
 import sys 
 import getopt
+import shlex
 import re 
 from collections import OrderedDict
 from io import StringIO
 
 __version__ = '1.2'
 
+class TSException(Exception):
+
+    def __init__(self, message, pos):
+        self.message = message
+        self.pos = pos
+
+        super().__init__()
+
+    def format_print(self, string):
+        """ Find line no and print.
+        """
+        # find position as line number
+        if self.pos < len(string):
+            print('Exception at line %d:' % (string[:self.pos].count('\n') + 1), file=sys.stderr)
+        print(self.message, file=sys.stderr)
+
+
 # ======== UTILS =============
-
-def read_dict(dict_str:str, ret:dict):
-    """ Convert string to dict
-    """
-    dict_str1 = re.sub(' *, *', ',', dict_str.strip().rstrip())
-    dict_str2 = re.sub(' *: *', ':', dict_str1)
-
-    ret.update([item.split(':') for item in dict_str2.split(',')])
-
 
 def stor(string:str):
     """ String to basic types
     """
-    if string in ['True', 'true', 'False', 'false']:
-        return bool(string)
+    if string in ('True', 'true'):
+        return True
+    elif string in ('False', 'false'):
+        return False
+    elif string in ('None', 'none'):
+        return None
 
     try:
-        if '.' in string:
+        if '.' in string or 'e' in string:
             return float(string)
         else:
             return int(string)
@@ -38,26 +55,26 @@ def stor(string:str):
 
 # ============ TS KERNELS ============
 
-def ts_replace(name:str, arg_table, flag_str_raw, strict_mode):
+def ts_replace(name:str, pos:int, arg_table, flag_str_raw, strict_mode):
     """ Replace a single string with new string.
     """
     try:
         return arg_table[name]
     except KeyError:
         if not strict_mode:
+            print('Waring: Skipping variable: %s' % name, file=sys.stderr)
             return flag_str_raw + name
         else:
-            print("No value for variable: %s" % name, file=sys.stderr)
-            raise 
+            raise TSException("No value for variable: %s" % name, pos) 
 
-
-def ts_exact(name:str):
+def ts_extract(name:str):
     """ Exact variable name from string
     """
     
     name1 = ''
     quotastack = []
 
+    # Remove quotes
     for c in name:
         if c in ['\'', '\"']:
             if len(quotastack) == 0 or quotastack[-1] != c:
@@ -69,19 +86,25 @@ def ts_exact(name:str):
 
     return re.findall(r'\b[A-Za-z_][A-Za-z0-9_]*(?!\()\b', name1)
 
-def ts_eval(string:str, arg_table):
+def ts_eval(string:str, pos:int, arg_table):
     """ Evaluate expression.
     """
-    return str(eval(string, arg_table))
+    try:
+        return str(eval(string, arg_table))
+    except Exception as e:
+        raise TSException(str(e), pos)
 
-def ts_exec(string:str, arg_table):
+def ts_exec(string:str, pos:int, arg_table):
     """ Execute code block, return stdout
     """
-    string1 = '\n'.join([s.strip().rstrip() for s in string.split('\n')])   # remove indent
+    string1 = '\n'.join([s.strip(' ') for s in string.split('\n')])   # remove indent
 
     mystdout = sys.stdout
     newstdout = sys.stdout = StringIO()
-    exec(string1, arg_table)
+    try:
+        exec(string1, arg_table)
+    except Exception as e:
+        raise TSException(str(e), pos)
     sys.stdout = mystdout
     return newstdout.getvalue()
 
@@ -93,255 +116,191 @@ def ts_scan(string:str, arg_table, arg_table_num, flag_str='$', mode='eval', str
     """
     exec_func = ts_exec if mode == 'exec' else ts_eval
 
-    flag_str_raw = flag_str
-    flag_str = re.sub(r'([\W])', r'\\\1', flag_str) 
-     
-    new_str1 = re.sub(r'(?<!\\)%s(\w+)' % flag_str, lambda m:ts_replace(m.group(1), arg_table, flag_str_raw, strict_mode), string)   # repalce variable
-    new_str2 = re.sub(r'(?<!\\)%s\{(?P<a>([^\}]|\n)*)\}' % flag_str, lambda m:exec_func(m.group('a'), arg_table_num), new_str1) # evaluate functions
-    new_str3 = re.sub(r'\\%s' % flag_str, flag_str_raw, new_str2) # replace unused flag str
+    def replacer(groupa, groupb, start):
+        if groupa is None:
+            return ts_replace(groupb, start, arg_table, flag_str_raw, strict_mode)
+        elif groupb is None:
+            return exec_func(groupa, start, arg_table_num)
 
-    return new_str3
+    flag_str_raw = flag_str
+    flag_str = re.sub(r'([\W])', r'\\\1', flag_str) # format flag 
+    
+    new_str1 = re.sub(r'(?<!\\)%s((?P<b>(\w+))|\{(?P<a>([^\}]|\n)*)\})' % flag_str, lambda m:replacer(m.group('a'), m.group('b'), m.start()), string) # evaluate functions
+    new_str2 = re.sub(r'\\%s' % flag_str, flag_str_raw, new_str1) # replace unused flag str
+
+    return new_str2
 
 
 def ts_scan_args(string: str, flag_str='$'):
+
+    from collections import OrderedDict
+    from keyword import kwlist
     
-    flag_str = re.sub(r'([\W])', r'\\\1', flag_str)
-    args = [m.group(1) for m in re.finditer(r'(?<!\\)%s(\w+)' % flag_str, string)]  # single variable
-    codes = [m.group('a') for m in re.finditer(r'(?<!\\)%s\{(?P<a>([^\}]|\n)*)\}' % flag_str, string)]
-    for c in codes:
-        args.extend(ts_exact(c))
+    flag_str = re.sub(r'([\W])', r'\\\1', flag_str) # format flag string
+    # Identify code blocks
+    code_groups = [(m.group('a'), m.start(), m.end()) for m in re.finditer(r'(?<!\\)%s\{(?P<a>([^\}]|\n)*)\}' % flag_str, string)]
+    # Remove code blocks
+    if not code_groups:
+        string2 = string
+    else:
+        string2 = string[0:code_groups[0][1]]
+        string2 += ''.join((string[code_groups[i][2]:code_groups[i+1][1]] for i in range(len(code_groups)-1)))
+        string2 += string[code_groups[-1][2]:]
+
+    # Identify single variables
+    args = [m.group(1) for m in re.finditer(r'(?<!\\)%s(\w+)' % flag_str, string2)]
+    for c in code_groups:
+        args.extend(ts_extract(c[0]))
+
+    # remove repeats
+    args = list(OrderedDict.fromkeys(args))
+
+    # remove keywords
+    for i in range(len(args)-1, -1, -1):
+        if args[i] in kwlist:
+            args.pop(i)
 
     return args 
 
-# ======= UI ================
-
-
-def read_macro(lines:list):
-    """ Input: list of string;
-        Returns: list of macro line number
-    """
-    macro_lines = []
-    macro_line_no = []
-    normal_line_begin = -1
-
-    for i, line in enumerate(lines):
-        if line.startswith('#ts'):
-            macro_line_no.append(i) 
-            macro_lines.append(line.rstrip('\n'))
-            
-        elif len(line) > 0 and line[0] not in [' ', '\t', '\n']:
-            normal_line_begin = i 
-            break    
-    return macro_lines, macro_line_no, normal_line_begin
-
-
-def divide_macro(lines:list, macro_line_no:list, normal_line_begin:int, rmmacro):
-    """ Input: list of string, macro_line_no, normal_line_begin
-        Returns: string before macro, string after macro
-    """
-
-    if normal_line_begin == -1: # no macro
-        str_before_macro = ''
-        str_after_macro = ''.join(lines)
-    else:
-        str_after_macro = ''.join(lines[normal_line_begin:])
-        if rmmacro:
-            str_before_macro = ''.join([lines[i] for i in range(normal_line_begin) if i not in macro_line_no])
-        else:
-            str_before_macro = ''.join(lines[:normal_line_begin])
-
-    return str_before_macro, str_after_macro
-
-
 # ========== main functions ================
 
-
-def main_sub(argv):
+def main(argv):
     """ Main entry for ts sub
     """
 
-    help_str = '''Usage: ts sub [-r name1:value1, name2:value2, ...] [-o output] [--flag=flag_str] 
-        [--exec] [--strmode] [--strict] [--rmmacro] [-v/--version] [-h/--help] input'''
+    help_str = '''ts [OPTIONS...] NAME1=VAL1 NAME2=VAL2 ... FILE'''
     long_help_str = '''
-ts sub: Provide pythonic, advanced substitution for files.
-Arguments:
---exec:     use 'exec' instead of 'eval' in blocks
---flag:     specify flag str (only one char), default is '$'
--h/--help:  display this help string
--o:         output filename (default is stdout)
--r:         replace string, followed by name:value... dict
---rmmacro:  remove macro in file after substitution
---strict:   all variables must be replaced
---strmode:  treat value as string (default is auto convert to number)
--v/--version: display version
-    '''
+ts: Provide pythonic, advanced substitution for files.
+Usage: ts [OPTIONS]... [NAME=VAL].. [FILE]
 
-    if not argv:
+Arguments:
+--exec:         use 'exec' instead of 'eval' in blocks
+-f, --flag:     specify flag str (only one char), default is '$'
+-h, --help:     display this help string
+-n, --note:     add description to variable
+-o, --output:   output filename (default is stdout)
+-s, --strict:   all variables must be replaced
+--str:          treat value as string (default is auto convert to number)
+-v, --view:     view arguments only'''
+
+    if len(argv) == 1:
         print(help_str)
         return 
     elif argv[1] == '-h' or argv[1] == '--help':
         print(long_help_str)
         return
-    elif argv[1] == '-v' or argv[1] == '--version':
-        print('Version: %s' % __version__, file=sys.stderr)
-        return 
-    
-    short_args = 'r:o:'
-    long_args = ['exec', 'flag=', 'strmode', 'strict', 'rmmacro']    
-    args = getopt.getopt(argv[1:], short_args, long_args)[1]
 
-    arg_table = dict()
-    auto_number = True
-    flag_str = '$'
-    full_argv = []    
-    mode = 'eval'
-    raw_output = ''
-    strict_mode = False 
-    rmmacro = False 
-
-    
-    # input
-    assert args, 'Error: No input'
-    with open(args[0], 'r') as inf:
-        flines = inf.readlines()
-    macro_lines, macro_line_no, normal_line_begin = read_macro(flines)
-
-    # deal with macros
-    for macro in macro_lines:
-        lsplit = macro.split()
-        assert len(lsplit) > 2, 'Invalid macro'
-        if lsplit[1] == 'set':
-            full_argv.extend(lsplit[2:])
-
-    full_argv.extend(argv[1:])   
-
-   # CLR
-    opts, args = getopt.getopt(full_argv, short_args, long_args)
-
-    for opt, arg in opts:
-        if opt == '--exec':
-            mode = 'exec'
-        elif opt == '--flag':
-            assert len(arg) == 1, 'Flag should be a char'
-            flag_str = arg 
-        elif opt == '-r':
-            read_dict(arg, arg_table)
-        elif opt == '--rmmacro':
-            rmmacro = True 
-        elif opt == '-o':
-            raw_output = arg
-        elif opt == '--strict':
-            strict_mode = True 
-        elif opt == '--strmode':
-            auto_number = False
-
-    
-    # auto convert
-    if auto_number:
-        arg_table_num = dict([(name, stor(val)) for name, val in arg_table.items()])
-    else:
-        arg_table_num = arg_table
-
-    str_before_macro, str_after_macro = divide_macro(flines, macro_line_no, normal_line_begin, rmmacro)
-    new_str = ts_scan(str_after_macro, arg_table, arg_table_num, flag_str=flag_str, mode=mode)
-
-    if raw_output:
-        output_name = ts_scan(raw_output, arg_table, arg_table_num, flag_str=flag_str, mode=mode)
-        output = open(output_name, 'w')
-    else:
-        output = sys.stdout 
-
-
-    output.write(str_before_macro)
-    output.write(new_str)
-    output.close()
-    return
-
-
-def main_view(argv):
-    
-    help_str = 'ts view [--flag=flag_str] input'
-    long_help_str = '''
-ts view: View arguments in a textscript file.
-Arguments:
---flag:     specify flag str
--h/--help:  display this help
--v/--version: display version
-    '''
-    if not argv:
-        print(help_str)
-        return 
-    elif argv[1] == '-h' or argv[1] == '--help':
-        print(long_help_str)
-        return
-    elif argv[1] == '-v' or argv[1] == '--version':
-        print('Version: %s' % __version__, file=sys.stderr)
-        return 
-    
-    short_args = 'r:o:'
-    long_args = ['exec', 'flag=', 'strmode', 'strict', 'rmmacro']    
+    short_args = 'f:n:o:sv'
+    long_args = ['exec', 'flag=', 'note', 'output', 'str', 'strict', 'view']    
     args = getopt.getopt(argv[1:], short_args, long_args)[1]
 
     arg_table = dict()
     arg_note = dict()
+    auto_number = True
+    exec_mode = False
     flag_str = '$'
-    full_argv = []    
-    raw_output = ''    
-        
+    raw_output = ''
+    strict_mode = False 
+    view_mode = False
+
+    argv_lines = []    
+
     # input
     assert args, 'Error: No input'
-    with open(args[0], 'r') as inf:
-        flines = inf.readlines()
-    macro_lines, macro_line_no, normal_line_begin = read_macro(flines)
+    with open(args[-1], 'r') as infile:
+        flines = infile.readlines()
 
     # deal with macros
-    for macro in macro_lines:
-        lsplit = macro.split()
-        assert len(lsplit) > 2, 'Invalid macro'
-        if lsplit[1] == 'set':
-            full_argv.extend(lsplit[2:])
-        elif lsplit[1] == 'note':
-            arg_note[lsplit[2]] = ' '.join(lsplit[3:])
 
-    full_argv.extend(argv[1:]) 
+    for i in range(len(flines)):
+        line = flines[i].strip('\n')
+
+        if line.startswith('#TS') or line.startswith('#ts'):
+            lsplit = shlex.split(line)
+            assert len(lsplit) > 1, 'Invalid macro'
+            argv_lines.append(lsplit[1:])
+        else:
+            break
+
+    argv_lines.append(argv[1:-1]) 
 
    # CLR
-    opts, args = getopt.getopt(full_argv, short_args, long_args)
 
-    for opt, arg in opts:
-        if opt == '--flag':
-            assert len(arg) == 1, 'Flag should be a char'
-            flag_str = arg         
-        elif opt == '-r':
-            read_dict(arg, arg_table)
-        elif opt == '-o':
-            raw_output = arg
+    for argv_line in argv_lines:
 
-    # scan args
-    str_after_macro = divide_macro(flines, macro_line_no, normal_line_begin, True)[1]
-    arg_list = set(ts_scan_args(str_after_macro, flag_str))
-    arg_list.update(arg_table)
+        opts, args = getopt.getopt(argv_line, short_args, long_args)
 
-    if raw_output:
-        arg_list.update(ts_scan_args(raw_output, flag_str))
+        for opt, arg in opts:
+            if opt == '--exec':
+                exec_mode = True
+            elif opt in ('-f', '--flag'):
+                assert len(arg) == 1, 'Flag must be a char'
+                flag_str = arg 
+            elif opt in ('-n', '--note'):
+                name, note = arg.split(':', 1)
+                arg_note[name] = note
+            elif opt in ('-o', '--output'):
+                raw_output = arg
+            elif opt in ('-s', '--strict'):
+                strict_mode = True 
+            elif opt == '--str':
+                auto_number = False
+            elif opt in ('-v', '--view'):
+                view_mode = True
+
+        for arg in args:
+            name, val = arg.split('=', 1)
+            arg_table[name] = val 
+
+    str_after_macro = ''.join(flines[i:])
+    mode = 'exec' if exec_mode else 'eval'
+
+    if view_mode:
+        arg_list = set()
+
+        if raw_output:
+            arg_list.update(ts_scan_args(raw_output, flag_str))
+        else:
+            raw_output = '<stdout>'
+
+        arg_list.update(ts_scan_args(str_after_macro, flag_str))
+        arg_list.update(arg_table)
+
+        print('Output: %s' % raw_output)
+        print('Name\tDefault\tDescription')
+        for a in arg_list:
+            print('%s\t%s\t%s' % (a, arg_table.get(a, '<unset>'), arg_note.get(a, '')))
+        return 
+
     else:
-        raw_output = '<stdout>'
+        # auto convert
+        if auto_number:
+            arg_table_num = dict([(name, stor(val)) for name, val in arg_table.items()])
+        else:
+            arg_table_num = arg_table
 
-    print('Output: %s' % raw_output)
-    print('Name\tDefault\tDescription')
-    for a in arg_list:
-        print('%s\t%s\t%s' % (a, arg_table.get(a, '<unset>'), arg_note.get(a, '')))
-    return 
+        if raw_output:
+            try:
+                output_name = ts_scan(raw_output, arg_table, arg_table_num, flag_str=flag_str, mode=mode, strict_mode=strict_mode)
+            except TSException as e:
+                print('While replacing output filename:', file=sys.stderr)
+                e.format_print(raw_output)
+                exit(1)
 
+            output = open(output_name, 'w')
+            print('Data written to %s' % output_name, file=sys.stderr)
+        else:
+            output = sys.stdout  
 
-def main(argv):
-    if argv[1] == 'sub':
-        return main_sub(argv[1:])
-    elif argv[1] == 'view':
-        return main_view(argv[1:])
-    else:
-        raise getopt.GetoptError()
+        try:
+            new_str = ts_scan(str_after_macro, arg_table, arg_table_num, flag_str=flag_str, mode=mode)
+        except TSException as e:
+            e.format_print(str_after_macro)
+            exit(1)
 
+        output.write(new_str)
+        output.close()
+        return
 
 if __name__ == '__main__':
     try:

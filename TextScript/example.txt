@@ -1,3 +1,3 @@
-#ts set -r a:2 -o a=$a-b=$b.output --rmmacro
-#ts note b The second variable
+#ts a=2
+#ts -n b:"The second variable"
 \$This file specify a as $a, specify ${'b as %d' % b}.
