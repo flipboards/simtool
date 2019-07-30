@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+
+import getopt
+import os
+import sys
+
+if __name__ == '__main__':
+    sep = '\t'
+    opts, args = getopt.getopt(sys.argv[1:], 's:')
+    for opt, arg in opts:
+        if opt == '-s':
+            sep = arg
+
+    # x and y columns
+    col = [1] + [2*i + 2 for i in range(len(args))]
+
+    # column title
+    print(sep.join([a.split('/', 1)[-1].rsplit('.', 1)[0] for a in args]))
+    sys.stdout.flush()
+    f = os.popen("paste -d '%s' %s|cut -d '%s' -f%s"% (
+        sep,
+        ' '.join(args),
+        sep,
+        ','.join(['%d'%c for c in col])
+    ))
+    sys.stdout.write(f.read())
+
